@@ -44,6 +44,10 @@ if [ -f /.DBSetupDone ]; then
 			sudo -u postgres $(which pg_ctl) start -D ${PGDATA} -s -o "-p 5432" -w -t 300
 		fi
 	fi
+	
+	# run scripts to pre-populate
+	find ./scripts -type f -name '*.sh' -exec sh -c "if [ ! -f {}.done ]; then {} && touch {}.done; fi" \;
+	
 	exit 0;
 fi
 
@@ -404,4 +408,5 @@ psql -ddaq -c "GRANT EXECUTE ON FUNCTION public.RetireAllBaseConfigurations() TO
 touch /.DBSetupDone
 
 # run scripts to pre-populate
-find ./scripts -type f -name '*.sh' -exec {} \;
+find ./scripts -type f -name '*.sh' -exec sh -c "if [ ! -f {}.done ]; then {} && touch {}.done; fi" \;
+
