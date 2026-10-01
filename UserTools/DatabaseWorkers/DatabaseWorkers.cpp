@@ -332,7 +332,7 @@ void DatabaseWorkers::DatabaseJobFail(void*& arg){
 	//query.err = ??? but what was the problem?
 	
 	DatabaseJobStruct* m_args=static_cast<DatabaseJobStruct*>(arg);
-	std::cerr<<m_args->m_job_name<<" failure"<<std::endl;
+	LOG(m_args->m_data->logger,LOG_ERR,"%s job failure",m_args->m_job_name.c_str());
 	++(m_args->monitoring_vars->jobs_failed);
 	
 	if(!m_args->logging_queue.empty() || !m_args->monitoring_queue.empty()){
