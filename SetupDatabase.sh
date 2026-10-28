@@ -132,15 +132,54 @@ sudo -u postgres psql -c "CREATE DATABASE daq WITH owner=root;"
 # set timezone to UTC
 psql -ddaq -c "ALTER DATABASE daq SET TIME ZONE 'UTC';"
 
+# also clear out directory for SSD tablespace if specified
+if [ ! -z ${SSD_PGROOT} ]; then
+	if [ -d ${SSD_PGROOT} ] && [ ! -n "$(find ${SSD_PGROOT} -prune -empty -type d 2>/dev/null)" ]; then
+		echo "${SSD_PGROOT} (SSD tablespace) is not empty - any existing database will be completely cleared. Continue?";
+		select result in OK Cancel; do
+			case $result in
+				OK)
+					break;
+					;;
+				Cancel)
+					exit 0;
+					;;
+				*)
+					echo "enter 1 or 2"
+					;;
+			esac
+		done
+	fi
+	
+	rm -rf ${SSD_PGROOT}
+	mkdir -p ${SSD_PGROOT}
+	chown -R postgres:postgres ${SSD_PGROOT}
+	
+	psql -ddaq -c "CREATE TABLESPACE ssd_tablespace LOCATION '${SSD_PGROOT}';"
+	# use it for temporary tables
+	psql -ddaq -c "ALTER SYSTEM SET temp_tablespaces TO ssd_tablespace;"
+	# we'll also use it for indexes and other things, e.g. last day's monitoring
+	export FAST_TABLESPACE=" TABLESPACE ssd_tablespace;"
+	
+fi
+
 # setup pg_partman
 psql -ddaq -c "CREATE SCHEMA partman;"
 psql -ddaq -c "CREATE EXTENSION pg_partman SCHEMA partman;"
-psql -ddaq -c "CREATE ROLE partman_user WITH LOGIN;"
-psql -ddaq -c "GRANT ALL ON SCHEMA partman TO partman_user;"
-psql -ddaq -c "GRANT ALL ON ALL TABLES IN SCHEMA partman TO partman_user;"
-psql -ddaq -c "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA partman TO partman_user;"
-psql -ddaq -c "GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA partman TO partman_user;"
-psql -ddaq -c "GRANT TEMPORARY ON DATABASE daq to partman_user;"
+
+psql -ddaq -c "CREATE ROLE partman_maintainer WITH LOGIN;"
+psql -ddaq -c "GRANT ALL ON SCHEMA partman TO partman_maintainer;"
+psql -ddaq -c "grant root to partman_maintainer;" # root being the owner of our tables. for better security we could use a dedicated role instead
+psql -ddaq -c "GRANT ALL ON ALL TABLES IN SCHEMA partman TO partman_maintainer;"
+psql -ddaq -c "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA partman TO partman_maintainer;"
+psql -ddaq -c "GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA partman TO partman_maintainer;"
+psql -ddaq -c "GRANT TEMPORARY ON DATABASE daq to partman_maintainer;"
+psql -ddaq -c "GRANT ALL ON SCHEMA old_tables TO partman_maintainer;"
+psql -ddaq -c "GRANT CREATE ON DATABASE daq TO partman_maintainer;"    # required for partman to create schemas
+
+# we'll have partman detach older partitions and move them to a different schema
+psql -ddaq -c "CREATE SCHEMA old_tables;"
+# we'll need an external process to manage this data, doing downsampling and moving the data to HDD
 
 # TODO FIXME To optimize storage and minimize wasted space due to alignment padding,
 # it's advisable to arrange columns in the table definition from largest to smallest data type.
@@ -216,31 +255,35 @@ echo "creating logging table"
 psql -ddaq -c "CREATE TABLE logging (time timestamp with time zone NOT NULL DEFAULT now(), device text NOT NULL, severity integer NOT NULL, message text NOT NULL, repeats integer NOT NULL DEFAULT 1) PARTITION BY RANGE (time);"
 
 echo "creating indices on logging device name and message severity"
-#psql -ddaq -c "CREATE INDEX ON logging (device) WITH (deduplicate_items = on);" # is this redundant with below?
-psql -ddaq -c "CREATE INDEX ON logging (device,severity) WITH (deduplicate_items = on);"
-psql -ddaq -c "CREATE INDEX ON logging USING BRIN(time);"
-# FIXME should we combine this as part of the composite index? logging (device, severity, brin(time)) ?
+psql -ddaq -c "CREATE INDEX ON logging (device, time) ${FAST_TABLESPACE};"
+#psql -ddaq -c "CREATE INDEX ON logging (device, severity, time) ${FAST_TABLESPACE};" # maybe useful if people filter on severity often...
+#psql -ddaq -c "CREATE INDEX ON logging USING BRIN(time) ${FAST_TABLESPACE};"
 #'ALTER TABLE logging ALTER COLUMN device SET STATISTICS 1000;' Default is 100, maximum is 10000.
 
 echo "creating logging template table"
 psql -ddaq -c "CREATE TABLE logging_template(LIKE logging);"
 
 echo "creating logging partition parent and child tables"
-psql -ddaq -c "SELECT partman.create_parent( p_parent_table:= 'public.logging', p_control := 'time', p_interval := '1 day', p_template_table:='public.logging_template');"
+psql -ddaq -c "SELECT partman.create_partition( p_parent_table:= 'public.logging', p_control := 'time', p_interval := '1 day', p_template_table:='public.logging_template');"
+
+echo "setting retention policy for logging table"
+psql -ddaq -c "UPDATE partman.part_config SET retention = '1 day', retention_schema = 'old_tables' WHERE parent_table = 'public.logging'";
 
 echo "creating monitoring table"
 psql -ddaq -c "CREATE TABLE monitoring (time timestamp with time zone NOT NULL DEFAULT now(), device text NOT NULL, subject text NOT NULL, data json NOT NULL) PARTITION BY RANGE (time);"
 
 echo "creating indices on monitoring device name and subject"
-#psql -ddaq -c "CREATE INDEX ON monitoring (device) WITH (deduplicate_items = on);"   # redundant?
-psql -ddaq -c "CREATE INDEX ON monitoring (device, subject) WITH (deduplicate_items = on);"
-psql -ddaq -c "CREATE INDEX ON monitoring USING BRIN(time);"
+psql -ddaq -c "CREATE INDEX ON monitoring (device, time, subject) ${FAST_TABLESPACE};"
+#psql -ddaq -c "CREATE INDEX ON monitoring USING BRIN(time) ${FAST_TABLESPACE};" # redundant with more useful B-Tree index on time
 
 echo "creating monitoring template table"
 psql -ddaq -c "CREATE TABLE monitoring_template(LIKE monitoring);"
 
 echo "creating monitoring partition parent and child tables"
-psql -ddaq -c "SELECT partman.create_parent( p_parent_table:= 'public.monitoring', p_control := 'time', p_interval := '1 day', p_template_table:='public.monitoring_template');"
+psql -ddaq -c "SELECT partman.create_partition( p_parent_table:= 'public.monitoring', p_control := 'time', p_interval := '1 day', p_template_table:='public.monitoring_template');"
+
+echo "setting retention policy for monitoring table"
+psql -ddaq -c "UPDATE partman.part_config SET retention = '1 day', retention_schema = 'old_tables' WHERE parent_table = 'public.monitoring'";
 
 # note on device name index usage: postgres never uses indexes for case insensitive searches!
 # we can create a functional index with 'lower(device)', but this only gets used if queries
@@ -261,15 +304,19 @@ echo "creating alarms table"
 psql -ddaq -c "CREATE TABLE alarms ( uid SERIAL NOT NULL, status INTEGER DEFAULT 0, critical BOOLEAN NOT NULL, first_time TIMESTAMP WITH TIME ZONE NOT NULL, last_time TIMESTAMP WITH TIME ZONE NOT NULL, device TEXT NOT NULL, description TEXT NOT NULL, silence_user TEXT, resolve_user TEXT, expert_user TEXT, resolve_time TIMESTAMP WITH TIME ZONE, resolution_description TEXT, event_counter INTEGER default 1 ) PARTITION BY RANGE (first_time);"
 
 echo "creating indices on alarms table"
-psql -ddaq -c "CREATE INDEX ON alarms (device) WITH (deduplicate_items = on);"
-psql -ddaq -c "CREATE INDEX ON alarms USING BRIN(last_time);"
+# uid is used in updates by webpage
+psql -ddaq -c "CREATE INDEX ON alarms (uid) ${FAST_TABLESPACE};"
+# for getting all alarms within a recent window... we should ensure these queries use last_time not first_time
+psql -ddaq -c "CREATE INDEX ON alarms (last_time) ${FAST_TABLESPACE};"
+# for queries that want to look up instances of alarms on a given device. we should ensure these use first_time, which seems more relevant? either or, it should match the WHERE clause.
+psql -ddaq -c "CREATE INDEX ON alarms (device, first_time) WITH (deduplicate_items = on) ${FAST_TABLESPACE};" # deduplicate_items is on by default
 
 echo "creating alarms template table"
 psql -ddaq -c "CREATE TABLE alarms_template(LIKE alarms);"
 psql -ddaq -c "ALTER TABLE alarms_template ADD PRIMARY KEY(uid);"
 
 echo "creating alarms partition parent and child tables"
-psql -ddaq -c "SELECT partman.create_parent( p_parent_table:= 'public.alarms', p_control := 'first_time', p_interval := '1 day', p_template_table:='public.alarms_template');"
+psql -ddaq -c "SELECT partman.create_partition( p_parent_table:= 'public.alarms', p_control := 'first_time', p_interval := '1 day', p_template_table:='public.alarms_template');"
 
 echo "creating insert_alarm function"
 psql -ddaq -c 'CREATE OR REPLACE FUNCTION "alarm_upsert"() RETURNS TRIGGER AS $BODY$ BEGIN UPDATE alarms SET event_counter=event_counter+1, last_time=NEW.first_time WHERE resolve_time IS NULL AND device=NEW.device AND description=NEW.description; IF FOUND THEN RETURN NULL; END IF; NEW.last_time = NEW.first_time; RETURN NEW; END; $BODY$ LANGUAGE plpgsql;'
@@ -280,14 +327,14 @@ echo "creating global_alerts table"
 psql -ddaq -c "CREATE TABLE global_alerts ( time TIMESTAMP WITH TIME ZONE NOT NULL, name TEXT NOT NULL, payload bytea ) PARTITION BY RANGE (time);"
 
 echo "creating indices on global_alerts table"
-psql -ddaq -c "CREATE INDEX ON global_alerts (name) WITH (deduplicate_items = on);"
-psql -ddaq -c "CREATE INDEX ON global_alerts USING BRIN(time);"
+psql -ddaq -c "CREATE INDEX ON global_alerts (name) ${FAST_TABLESPACE};" # looking for specfic alerts
+psql -ddaq -c "CREATE INDEX ON global_alerts (time) ${FAST_TABLESPACE};" # looking for all alerts over a timespan
 
 echo "creating global_alerts template table"
 psql -ddaq -c "CREATE TABLE global_alerts_template(LIKE global_alerts);"
 
 echo "creating global_alerts partition parent and child tables"
-psql -ddaq -c "SELECT partman.create_parent( p_parent_table:= 'public.global_alerts', p_control := 'time', p_interval := '1 day', p_template_table:='public.global_alerts_template');"
+psql -ddaq -c "SELECT partman.create_partition( p_parent_table:= 'public.global_alerts', p_control := 'time', p_interval := '1 day', p_template_table:='public.global_alerts_template');"
 
 echo "creating rootplots table"
 psql -ddaq -c "CREATE TABLE rootplots (time timestamp with time zone NOT NULL DEFAULT now(), name text NOT NULL, version int NOT NULL, data json NOT NULL, draw_options text NOT NULL DEFAULT '', lifetime int NOT NULL DEFAULT 5);"
@@ -309,31 +356,29 @@ psql -ddaq -c 'CREATE TRIGGER trig_plotlyplot_ver BEFORE insert ON plotlyplots F
 
 echo "creating event_display table"
 # events themselves will be zstd compressed
-psql -ddaq -c "CREATE TABLE event_display (readout_number bigint PRIMARY KEY, run_number bigint NOT NULL, time timestamp with time zone NOT NULL DEFAULT now(),  data bytea NOT NULL, type integer NOT NULL);"
+psql -ddaq -c "CREATE UNLOGGED TABLE event_display (readout_number bigint PRIMARY KEY, run_number bigint NOT NULL, time timestamp with time zone NOT NULL DEFAULT now(), data bytea NOT NULL, type integer NOT NULL);"
 
 echo "creating autoincrement function for event_display readout_number"
 psql -ddaq -c 'CREATE OR REPLACE FUNCTION "fn_event_display_readout_number"() returns "pg_catalog"."trigger" as $BODY$ begin new.readout_number = (select COALESCE(MAX(readout_number),0)+1 from event_display); return NEW; end; $BODY$ LANGUAGE plpgsql VOLATILE COST 100;'
 psql -ddaq -c 'CREATE TRIGGER trig_event_display_readout_number BEFORE insert ON event_display FOR EACH ROW EXECUTE PROCEDURE fn_event_display_readout_number();'
 
 echo "creating index on event type"
-# is this overkill?
-psql -ddaq -c "CREATE INDEX ON event_display (readout_number);"
-# is this?
-#psql -ddaq -c "CREATE INDEX ON event_display (run_number) WITH (deduplicate_items = on);"
-psql -ddaq -c "CREATE INDEX ON event_display (type) WITH (deduplicate_items = on);"
+psql -ddaq -c "CREATE INDEX ON event_display (readout_number) ${FAST_TABLESPACE};" # looking up a specific event
+#psql -ddaq -c "CREATE INDEX ON event_display (run_number) ${FAST_TABLESPACE};"
+psql -ddaq -c "CREATE INDEX ON event_display (type) ${FAST_TABLESPACE};" # looking up specific event types
 
 echo "creating command_log table"
 psql -ddaq -c "CREATE TABLE command_log (time timestamp with time zone NOT NULL DEFAULT now(), user_id integer references users(user_id), command json NOT NULL) PARTITION BY RANGE (time);"
 
 # is this overkill with partitioning? maybe also change partitioning interval?
 echo "creating index on command_log times"
-psql -ddaq -c "CREATE INDEX ON command_log USING BRIN(time);"
+psql -ddaq -c "CREATE INDEX ON command_log (time) ${FAST_TABLESPACE};"
 
 echo "creating command_log template table"
 psql -ddaq -c "CREATE TABLE command_log_template(LIKE command_log);"
 
 echo "creating command_log partition parent and child tables"
-psql -ddaq -c "SELECT partman.create_parent( p_parent_table:= 'public.command_log', p_control := 'time', p_interval := '1 day', p_template_table:='public.command_log_template');"
+psql -ddaq -c "SELECT partman.create_partition( p_parent_table:= 'public.command_log', p_control := 'time', p_interval := '1 day', p_template_table:='public.command_log_template');"
 
 echo "creating locations table"
 psql -ddaq -c "CREATE type tank_location as enum ('bottom', 'barrel', 'top');"
@@ -343,13 +388,13 @@ echo "creating shift_check table"
 psql -ddaq -c "CREATE TABLE shift_check ( time timestamp with time zone NOT NULL DEFAULT now(), user_id integer references users(user_id), data jsonb NOT NULL) PARTITION BY RANGE (time);"
 
 echo "creating index on shift check times"
-psql -ddaq -c "CREATE INDEX ON shift_check USING BRIN(time);"
+psql -ddaq -c "CREATE INDEX ON shift_check (time) ${FAST_TABLESPACE};"
 
 echo "creating shift_check template table"
 psql -ddaq -c "CREATE TABLE shift_check_template(LIKE shift_check);"
 
 echo "creating shift_check partition parent and child tables"
-psql -ddaq -c "SELECT partman.create_parent( p_parent_table:= 'public.shift_check', p_control := 'time', p_interval := '1 day', p_template_table:='public.shift_check_template');"
+psql -ddaq -c "SELECT partman.create_partition( p_parent_table:= 'public.shift_check', p_control := 'time', p_interval := '1 day', p_template_table:='public.shift_check_template');"
 
 echo "creating function to validate usernames"
 psql -ddaq -c "CREATE OR REPLACE FUNCTION public.CheckUserExists(resolution_username text, expert_username text) RETURNS TABLE (resolution_ok boolean, expert_ok boolean) LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS \$function$ SELECT EXISTS (SELECT 1 FROM public.users WHERE username = resolution_username) AS resolution_ok, EXISTS (SELECT 1 FROM public.users WHERE username = expert_username) AS expert_ok; \$function$"
@@ -386,6 +431,8 @@ SELECT TRUE \
 echo "adding webserver database role"
 psql -ddaq -c "CREATE ROLE webserver LOGIN"
 psql -ddaq -c "GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO webserver;"
+# FIXME UPDATE permissions aren't needed if the updates are embedded in a function call
+# we should do this so we can control what they can update (e.g. only set retired flag)
 psql -ddaq -c "GRANT UPDATE ON alarms, devices TO webserver;"
 psql -ddaq -c "GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO webserver;"
 psql -ddaq -c "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA public TO webserver;"
@@ -394,12 +441,30 @@ psql -ddaq -c "REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCH
 psql -ddaq -c "REVOKE CREATE ON SCHEMA public FROM webserver;"
 psql -ddaq -c "REVOKE CREATE ON DATABASE daq FROM webserver;"
 psql -ddaq -c "REVOKE SELECT ON TABLE users FROM webserver;"
-# not sure if these are needed, are they covered by usage of all routines on public?
+# not sure if these are all needed, aren't they covered by usage of all routines on public?
 psql -ddaq -c "GRANT EXECUTE ON FUNCTION ValidateUser(text, text) TO webserver";
 psql -ddaq -c "GRANT EXECUTE ON FUNCTION public.CheckUserExists(text, text) TO webserver";
 psql -ddaq -c 'GRANT EXECUTE ON FUNCTION public.UsernameFromUserId(integer) TO webserver;'
 psql -ddaq -c "GRANT EXECUTE ON FUNCTION public.UserIdFromUsername(text) TO webserver;"
 psql -ddaq -c "GRANT EXECUTE ON FUNCTION public.RetireAllBaseConfigurations() TO webserver;"
+
+# add a database role for the middleman
+echo "adding middleman role"
+psql -ddaq -c "CREATE ROLE middleman LOGIN"
+psql -ddaq -c "GRANT SELECT, INSERT, MAINTAIN ON ALL TABLES IN SCHEMA public TO middleman;"
+psql -ddaq -c "REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA public FROM middleman;"
+psql -ddaq -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO middleman;"
+psql -ddaq -c "GRANT CONNECT, TEMPORARY ON DATABASE daq TO middleman;"
+psql -ddaq -c "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA public TO middleman;"
+#psql -ddaq -c "GRANT SET ON PARAMETER xxx TO middleman;" allow changing some settings
+psql -ddaq -c "REVOKE CREATE ON SCHEMA public FROM middleman;"
+psql -ddaq -c "REVOKE CREATE ON DATABASE daq FROM middleman;"
+# transaction timeout limits so people can't lock the middleman
+psql -ddaq -c "ALTER ROLE middleman SET statement_timeout = 1000;"
+psql -ddaq -c "ALTER ROLE middleman SET idle_in_transaction_timeout = 5000;"
+psql -ddaq -c "ALTER ROLE middleman SET transaction_timeout = 10000;"
+psql -ddaq -c "ALTER ROLE middleman SET lock_timeout = 10000;"
+# may be overriden with `psql -c "set statement_timeout = '30s';"` within a given session
 
 # DEFAULT DATA
 ###############

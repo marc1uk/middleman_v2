@@ -1,5 +1,6 @@
 #include "CrashCheck.h"
 #include <fstream>
+#include <cstdio>
 #include <time.h>
 
 CrashCheck::CrashCheck():Tool(){}
@@ -15,7 +16,8 @@ bool CrashCheck::Initialise(std::string configfile, DataModel &data){
   m_variables.Get("crash_check_file",crash_check_file);
   
   // if there's a crash check file that didn't get cleaned up, the last run didn't terminate gracefully
-  std::ifstream f_check(crash_check_file);
+  LOG(m_data->logger,LOG_NOTICE,"checking for crash file %s",crash_check_file.c_str());
+  std::ifstream f_check(crash_check_file.c_str());
   if(f_check.is_open()){
     std::string ts;
     f_check >> ts;
