@@ -185,15 +185,14 @@ psql -ddaq -c "CREATE SCHEMA old_tables;"
 # it's advisable to arrange columns in the table definition from largest to smallest data type.
 
 echo "creating users table"
-psql -ddaq -c "CREATE TABLE users (user_id serial PRIMARY KEY, username text NOT NULL, password_hash text NOT NULL, permissions jsonb);"
+psql -ddaq -c "CREATE TABLE users (user_id integer GENERATED ALWAYS AS IDENTIY PRIMARY KEY, username text NOT NULL, password_hash text NOT NULL, permissions jsonb);"
 
 echo "creating index on users table"
 psql -ddaq -c "CREATE UNIQUE INDEX user_name_idx ON users(LOWER(username));"
 
 echo "creating base_config table"
 # add more fields: retired by, on, reason?
-#psql -ddaq -c "CREATE TABLE base_config (config_id serial PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), name text NOT NULL, version int NOT NULL, description text NOT NULL, author int NOT NULL references users(user_id), retired boolean NOT NULL DEFAULT FALSE, data jsonb NOT NULL);"
-psql -ddaq -c "CREATE TABLE base_config (config_id serial PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), name text NOT NULL, version int NOT NULL, description text NOT NULL, author text NOT NULL, retired boolean NOT NULL DEFAULT FALSE, data jsonb NOT NULL);"
+psql -ddaq -c "CREATE TABLE base_config (config_id integer GENERATED ALWAYS AS IDENTIY PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), name text NOT NULL, version int NOT NULL, description text NOT NULL, author int NOT NULL references users(user_id), retired boolean NOT NULL DEFAULT FALSE, data jsonb NOT NULL);"
 
  # n.b. this index is doing double duty of enforcing unique {device:version} constraint and providing an ordered index
  # a unique(name,version) constraint uses an index to accomplish this under the hood, by doing it explicitly we can make the index ordered
@@ -206,8 +205,7 @@ psql -ddaq -c 'CREATE TRIGGER trig_base_config_ver BEFORE insert ON base_config 
 
 echo "creating runmode_config table"
 # add more fields: retired by, on, reason?
-#psql -ddaq -c "CREATE TABLE runmode_config (config_id serial PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), name text NOT NULL, version int NOT NULL, description text NOT NULL, author int NOT NULL references users(user_id), retired boolean NOT NULL DEFAULT FALSE, data jsonb NOT NULL);"
-psql -ddaq -c "CREATE TABLE runmode_config (config_id serial PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), name text NOT NULL, version int NOT NULL, description text NOT NULL, author text NOT NULL, retired boolean NOT NULL DEFAULT FALSE, data jsonb NOT NULL);"
+psql -ddaq -c "CREATE TABLE runmode_config (config_id integer GENERATED ALWAYS AS IDENTIY PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), name text NOT NULL, version int NOT NULL, description text NOT NULL, author int NOT NULL references users(user_id), retired boolean NOT NULL DEFAULT FALSE, data jsonb NOT NULL);"
 
 echo "creating index on runmode_config table"
 psql -ddaq -c "CREATE UNIQUE INDEX ON runmode_config (name, version DESC NULLS LAST)"
@@ -217,21 +215,20 @@ psql -ddaq -c 'CREATE OR REPLACE FUNCTION "fn_runmode_config_ver"() returns "pg_
 psql -ddaq -c 'CREATE TRIGGER trig_runmode_config_ver BEFORE insert ON runmode_config FOR EACH ROW EXECUTE PROCEDURE fn_runmode_config_ver();'
 
 echo "creating run_info table"
-psql -ddaq -c "CREATE TABLE run_info (run_number serial PRIMARY KEY, start_time timestamp with time zone NOT NULL, stop_time timestamp with time zone, base_config_id int NOT NULL references base_config(config_id), runmode_config_id int NOT NULL references runmode_config(config_id), testing boolean NOT NULL, comments text NOT NULL, bad_devices json NOT NULL DEFAULT '{}');"
+psql -ddaq -c "CREATE TABLE run_info (run_number integer GENERATED ALWAYS AS IDENTIY PRIMARY KEY, start_time timestamp with time zone NOT NULL, stop_time timestamp with time zone, base_config_id int NOT NULL references base_config(config_id), runmode_config_id int NOT NULL references runmode_config(config_id), testing boolean NOT NULL, comments text NOT NULL, bad_devices json NOT NULL DEFAULT '{}');"
 
 echo "creating devices table"
-# more fields: created on, by? retired by, retirement cause? device description?
-psql -ddaq -c "CREATE TABLE devices (name text PRIMARY KEY, description TEXT, author_id INTEGER NOT NULL, created_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), retired_time TIMESTAMP WITH TIME ZONE DEFAULT NULL, retired_user_id INTEGER DEFAULT NULL, retired boolean NOT NULL DEFAULT FALSE);"
+# more fields: created on, by? retirement cause?
+psql -ddaq -c "CREATE TABLE devices (device_id integer GENERATED ALWAYS AS IDENTIY PRIMARY KEY, name TEXT NOT NULL, description TEXT, author_id INTEGER NOT NULL references users(id), created_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(), retired_time TIMESTAMP WITH TIME ZONE DEFAULT NULL, retired_user_id INTEGER references users(user_id) DEFAULT NULL, retired boolean NOT NULL DEFAULT FALSE);"
 
 # functional index to ensure no duplicates even ignoring case
-# unfortunately to use it as a foreign key we need a redundant unique constraint on the value itself as well
 echo "creating index on devices table"
 psql -ddaq -c "CREATE UNIQUE INDEX dev_name_idx ON devices(LOWER(name));"
 
 echo "creating device_config table"
 # XXX IMPORTANT: VERSION 0 OF ALL DEVICE CONFIGURATIONS SHOULD BE DEVICE OFF
-#psql -ddaq -c "CREATE TABLE device_config (id serial PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), device text references devices(name), version int NOT NULL, author int NOT NULL references users(user_id), description text NOT NULL, data json NOT NULL, retired_time TIMESTAMP WITH TIME ZONE DEFAULT NULL, retired_user_id INTEGER DEFAULT NULL, retired BOOLEAN NOT NULL DEFAULT FALSE);"
-psql -ddaq -c "CREATE TABLE device_config (id serial PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), device text references devices(name), version int NOT NULL, author text NOT NULL, description text NOT NULL, data json NOT NULL, retired_time TIMESTAMP WITH TIME ZONE DEFAULT NULL, retired_user_id INTEGER DEFAULT NULL, retired BOOLEAN NOT NULL DEFAULT FALSE);"
+# references device by name not id... better with our config retrieval method as we get requests by name
+psql -ddaq -c "CREATE TABLE device_config (id integer GENERATED ALWAYS AS IDENTIY PRIMARY KEY, time timestamp with time zone NOT NULL DEFAULT now(), device text references devices(name), version int NOT NULL, author int NOT NULL references users(user_id), description text NOT NULL, data json NOT NULL, retired_time TIMESTAMP WITH TIME ZONE DEFAULT NULL, retired_user_id INTEGER references users(user_id) DEFAULT NULL, retired BOOLEAN NOT NULL DEFAULT FALSE);"
 
 echo "creating index on device_config table"
 psql -ddaq -c "CREATE UNIQUE INDEX ON device_config (device, version DESC NULLS LAST)"
@@ -252,7 +249,8 @@ psql -ddaq -c 'CREATE OR REPLACE FUNCTION "fn_calibration_ver"() returns "pg_cat
 psql -ddaq -c 'CREATE TRIGGER trig_calibration_ver BEFORE insert ON calibration FOR EACH ROW EXECUTE PROCEDURE fn_calibration_ver();'
 
 echo "creating logging table"
-psql -ddaq -c "CREATE TABLE logging (time timestamp with time zone NOT NULL DEFAULT now(), device text NOT NULL, severity integer NOT NULL, message text NOT NULL, repeats integer NOT NULL DEFAULT 1) PARTITION BY RANGE (time);"
+# we will not enforce logging device_ids referential integrity by choice: for performance, and because it's not important
+psql -ddaq -c "CREATE TABLE logging (time timestamp with time zone NOT NULL DEFAULT now(), device_id integer NOT NULL, severity integer NOT NULL, message text NOT NULL, repeats integer NOT NULL DEFAULT 1) PARTITION BY RANGE (time);"
 
 echo "creating indices on logging device name and message severity"
 psql -ddaq -c "CREATE INDEX ON logging (device, time) ${FAST_TABLESPACE};"
@@ -270,7 +268,7 @@ echo "setting retention policy for logging table"
 psql -ddaq -c "UPDATE partman.part_config SET retention = '1 day', retention_schema = 'old_tables' WHERE parent_table = 'public.logging'";
 
 echo "creating monitoring table"
-psql -ddaq -c "CREATE TABLE monitoring (time timestamp with time zone NOT NULL DEFAULT now(), device text NOT NULL, subject text NOT NULL, data json NOT NULL) PARTITION BY RANGE (time);"
+psql -ddaq -c "CREATE TABLE monitoring (time timestamp with time zone NOT NULL DEFAULT now(), device_id integer NOT NULL, subject text NOT NULL, data json NOT NULL) PARTITION BY RANGE (time);"
 
 echo "creating indices on monitoring device name and subject"
 psql -ddaq -c "CREATE INDEX ON monitoring (device, time, subject) ${FAST_TABLESPACE};"
@@ -301,7 +299,8 @@ psql -ddaq -c "UPDATE partman.part_config SET retention = '1 day', retention_sch
 
 echo "creating alarms table"
 # FIXME ideally uid would be unique, but requires being part of partitioning column, so we apply to the template
-psql -ddaq -c "CREATE TABLE alarms ( uid SERIAL NOT NULL, status INTEGER DEFAULT 0, critical BOOLEAN NOT NULL, first_time TIMESTAMP WITH TIME ZONE NOT NULL, last_time TIMESTAMP WITH TIME ZONE NOT NULL, device TEXT NOT NULL, description TEXT NOT NULL, silence_user TEXT, resolve_user TEXT, expert_user TEXT, resolve_time TIMESTAMP WITH TIME ZONE, resolution_description TEXT, event_counter INTEGER default 1 ) PARTITION BY RANGE (first_time);"
+# still use device name and do not enforce constraint
+psql -ddaq -c "CREATE TABLE alarms ( uid integer GENERATED ALWAYS AS IDENTIY NOT NULL, status INTEGER DEFAULT 0, critical BOOLEAN NOT NULL, first_time TIMESTAMP WITH TIME ZONE NOT NULL, last_time TIMESTAMP WITH TIME ZONE NOT NULL, device TEXT NOT NULL, description TEXT NOT NULL, silence_user TEXT, resolve_user TEXT, expert_user TEXT, resolve_time TIMESTAMP WITH TIME ZONE, resolution_description TEXT, event_counter INTEGER default 1 ) PARTITION BY RANGE (first_time);"
 
 echo "creating indices on alarms table"
 # uid is used in updates by webpage

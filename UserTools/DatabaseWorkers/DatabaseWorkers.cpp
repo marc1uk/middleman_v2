@@ -416,17 +416,6 @@ std::string DatabaseWorkers::CacheConfigs(const char* payload){
 		                    "FROM expanded f JOIN device_config dc ON f.device=dc.device AND (f.version)::int=dc.version";
 		//printf("caching configs with query '%s', base_id %d, runmode_id %d\n",query.c_str(), new_base_config_id, new_runmode_config_id);
 		
-		/*
-		// to accommodate James' base/runmode config entry format:
-		// [{"device":"mydev", "version":X}, {"device":"mydev2", "version":Y} ...]
-		// N.B this doesn't work: || with JSON arrays appends them, so runmode entries don't override base ones.
-		std::string query = "WITH base AS ( SELECT data FROM base_config WHERE config_id=$1), "
-		                    "  runmode AS ( SELECT data FROM runmode_config WHERE config_id=$2), "
-		                    "   merged AS ( SELECT base.data || runmode.data AS data FROM base CROSS JOIN runmode), "
-		                    " expanded AS ( SELECT d->>'device' AS device, d->>'version' AS version from merged CROSS JOIN jsonb_array_elements(merged.data) as d ) "
-		                    "SELECT f.device, json_build_object('version', f.version, 'data', dc.data, 'base_config_id', $1, 'runmode_config_id', $2 ) FROM expanded f JOIN device_config dc ON f.device=dc.device AND (f.version)::int=dc.version";
-		*/
-		
 		for(auto [ device, json ] : tx.query<std::string_view, std::string_view>(query, pqxx::params(new_base_config_id, new_runmode_config_id))){
 			//printf("cacheing device '%s', config '%s'\n",std::string(device).c_str(),std::string(json).c_str());
 			cached_configs[std::string{device}]=json;
