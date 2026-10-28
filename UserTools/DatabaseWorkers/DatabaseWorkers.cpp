@@ -463,9 +463,9 @@ bool DatabaseWorkers::DatabaseJob(void*& arg){
 		} else {
 			// set up prepared statements. These are, sadly, a property of the connection
 			// logging insert
-			conn->prepare("logging_insert", "INSERT INTO logging ( time, device, severity, message ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, device text, severity int, message text)");
+			conn->prepare("logging_insert", "INSERT INTO logging ( time, device_id, severity, message ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, device_id integer, severity int, message text)");
 			// monitoring insert
-			conn->prepare("monitoring_insert", "INSERT INTO monitoring ( time, device, subject, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, device text, subject text, data json)");
+			conn->prepare("monitoring_insert", "INSERT INTO monitoring ( time, device_id, subject, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, device_id integer, subject text, data json)");
 			// alarms insert
 			// N.B. a trigger is attached to inserts that will instead update an existing alarm if an unresolved one with the same name and message exists
 			conn->prepare("alarms_insert", "INSERT INTO alarms ( first_time, device, critical, description ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, device text, critical boolean, description text)");
@@ -476,11 +476,11 @@ bool DatabaseWorkers::DatabaseJob(void*& arg){
 			// calibration insert
 			conn->prepare("calibration_insert", "INSERT INTO calibration ( time, name, description, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, name text, description text, data json) returning version");
 			// device config insert
-			conn->prepare("device_config_insert", "INSERT INTO device_config ( time, device, author, description, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, device text, author text, description text, data json) returning version");
+			conn->prepare("device_config_insert", "INSERT INTO device_config ( time, device, author, description, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, device text, author integer, description text, data json) returning version");
 			// run config insert
-			conn->prepare("base_config_insert", "INSERT INTO base_config ( time, name, author, description, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, name text, author text, description text, data json) returning config_id");
+			conn->prepare("base_config_insert", "INSERT INTO base_config ( time, name, author, description, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, name text, author integer, description text, data json) returning config_id");
 			// run mode config insert
-			conn->prepare("runmode_config_insert", "INSERT INTO runmode_config ( time, name, author, description, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, name text, author text, description text, data json) returning config_id");
+			conn->prepare("runmode_config_insert", "INSERT INTO runmode_config ( time, name, author, description, data ) SELECT * FROM json_to_recordset( $1::json ) as t(time timestamptz, name text, author integer, description text, data json) returning config_id");
 		}
 	}
 	
